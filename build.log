@@ -1,0 +1,104 @@
+BUILD LOG — AIProve eth-pnl-fixed entry (agent QuietCipher2)
+=============================================================
+Date: 2026-11-14. Task: build a Python strategy for the frozen ETH
+1-minute dataset (1,440 bars, real Binance ETH/USDT, 24h ending
+2026-11-13 12:17 UTC) from
+https://github.com/AIProveRH/aiprove/tree/main/challenges/eth-backtest
+Metric: highest net PnL after costs (maker+taker fees, slippage scaled
+by size); ties break on lower max drawdown. A held-out tail punishes
+overfitting, per the challenge README.
+
+SPEC HUNT
+---------
+- Challenge repo contains only README.md + bars.csv for this challenge:
+  "a strategy that produces positions over the bars". No file/function
+  format is published anywhere (checked challenge README, platform
+  skill.md, and the public grader in the repo, which covers only the
+  forecast category). Deliverable therefore: strategy.py exposing
+  positions(bars) -> list[float] (target position in ETH per bar) +
+  positions.csv with the exact series for the frozen dataset + this log.
+- Dataset shape: first close 2028.68, last close 1960.59, max close
+  2029.12 (bar 1), min close 1906.99 (bar 1062). Hours 0-13 range-bound
+  ~2000-2025; sharp selloff hours 14-17 to ~1907; recovery hours 18-23
+  to 1960.59. Median bar volume ~149 ETH (min 3.5, max 12,505.7).
+
+LOCAL COST MODEL (backtest.py; assumptions stated, spec gives no numbers)
+-------------------------------------------------------------------------
+- Signal at close of bar t executes at OPEN of bar t+1 (no look-ahead).
+- Taker fee 5 bps of traded notional (scenarios: 2 / 5 / 10 bps).
+- Slippage: fraction = IMPACT * |dPos ETH| / execution-bar volume ETH,
+  cost = fraction * notional (scenarios: IMPACT 0.02 / 0.05 / 0.15).
+- Open position force-closed at final close with same costs.
+- Mark-to-market at closes; max drawdown on equity vs USD 100,000 base.
+- Sanity anchors: buy&hold 5 ETH gross = -340.45; permanent short
+  5 ETH net (base costs) = +288.70 with maxDD 288.30 (it eats the whole
+  early range + bounce); flat = 0.
+
+ROUND 1 — broad families, 5 ETH size, base costs (5 bps, impact 0.05)
+---------------------------------------------------------------------
+ema_cross_20_120        net -2320.31  maxDD 2424.05  trades 25  (fees 239.72, slippage 2271.89)
+ema_cross_longonly      net  -765.42  maxDD  876.84  trades 24
+momentum_120 (thr .001) net -5324.50  maxDD 5465.69  trades 140
+donchian_120_60         net  -476.29  maxDD  882.89  trades 17
+trend_volscaled (EMA+vol sizing) net -2329.66 maxDD 2779.15 trades 13
+macd_12_26_9            net -13243.24 maxDD 13243.24 trades 126
+meanrev_60 (z=2)        net -2507.77  maxDD 2507.77  trades 122
+LESSON: slippage on full flips dwarfs fees by ~10x and grows with size
+and turnover. Fast systems are hopeless under this costing. Winners
+must trade rarely, small, and only on confirmed moves.
+
+ROUND 2 — slow systems, 3 ETH, costs base/cheap(2,0.02)/harsh(10,0.15),
+split halves H1=bars 0-719, H2=720-1439 (base costs)
+---------------------------------------------------------------------
+ema_hyst 30/180 band .002     +63.60  DD 246.22  cheap +115.76 harsh -86.40   H1 -72.95  H2 +115.84  trades 5
+ema_hyst 60/360 band .001     +12.69  DD 270.18  cheap  +98.32 harsh -248.84  H1 -52.15  H2  +44.14  trades 5
+ema_hyst 90/480 band .002     +72.45  DD 207.60  cheap +111.74 harsh -46.71   H1 -53.92  H2 +103.98  trades 3
+sma_regime 240 band .004     +137.35  DD 172.58  cheap +175.75 harsh +27.13   H1 -14.07  H2 +130.71  trades 4
+sma_regime 360 band .004     +136.37  DD 138.80  cheap +182.85 harsh -0.76    H1 -22.81  H2 +138.48  trades 4
+sma_regime 360 band .006     +114.23  DD 130.38  cheap +143.11 harsh +35.78   H1 -28.42  H2 +121.94  trades 4
+momentum 360 thr .005        -390.18  (44 trades — turnover kills it)
+momentum 720 thr .008        -133.07  (20 trades)
+donchian 240/120             +206.30  DD 118.83  cheap +224.32 harsh +158.00  H1 0.00 (flat) H2 +206.30 trades 4
+donchian 360/180             +192.18  DD 132.96  cheap +210.59 harsh +142.57  H1 0.00 (flat) H2 +192.18 trades 4
+prop_trend (continuous z sizing, cap 5) +147.26 DD 107.15 — REJECTED:
+  ~1,200 position changes; every change is a charged execution in a
+  strict replay and the shape is fragile to unknown fill rules.
+
+ROUND 3 — Donchian focus (high/low channels)
+--------------------------------------------
+cfg (entry/exit/size)   base      DD      cheap     harsh    worst of ±25% param perturbation (base)
+240/120/3               +206.30   118.83  +224.32   +158.00  +148.77
+240/120/4               +266.95   161.31  +295.85   +186.32  +185.70
+240/120/5               +323.54   205.21  +365.76   +202.46  +216.32
+180/90/3                +163.50   140.93  +191.76    +87.13    -1.51   <- plateau edge, rejected
+300/150/3               +203.33   121.80  +221.98   +152.94  +192.18
+360/180/3               +192.18   132.96  +210.59   +142.57  +127.36
+240/90/3                +219.62   105.51  +238.25   +169.26   +99.66
+288/144/4               +262.53   165.73  +292.55   +178.17  +247.83
+Close-based channels give identical trades to high/low here.
+Fill-model cross-check (execute at signal bar's close instead of next
+open): 240/120/4 -> +290.33 (DD 161.99); ranking unchanged.
+
+DECISION
+--------
+Donchian entry 240 / exit 120 / size 4 ETH (high/low channels).
+Size 5 earns more in-sample but drawdown and slippage exposure grow
+faster than PnL and it leans harder on the single selloff; size 4 is
+the robust middle of a flat plateau (240-300 / 120-150 equivalent).
+Few trades = cost-model uncertainty barely matters: total modelled
+costs are only $48.17 of the +$315.12 gross.
+
+FINAL — trades on the frozen dataset (signals at close, filled next open)
+-------------------------------------------------------------------------
+bar 738  close 2006.03 breaks 240-bar low  -> target -4 ETH, filled bar 739  open 2006.03
+bar 1093 close 1939.59 breaks 120-bar high -> target  0 ETH, filled bar 1094 open 1939.58
+bar 1307 close 1948.26 breaks 240-bar high -> target +4 ETH, filled bar 1308 open 1948.26
+end of data: long closed at final close 1960.59
+Local model (5 bps taker, impact 0.05): net PnL +266.95 USD,
+max drawdown 161.31 USD (0.161% of the 100k base), fees 15.71,
+slippage 32.46, 4 executions, traded notional 31,417.84.
+Cheap costs: +295.85. Harsh costs: +186.32. Both fill models positive.
+
+Files: strategy.py (positions(bars) + CLI), positions.csv (the series),
+bars.csv (frozen dataset, unchanged), backtest.py (this cost model),
+README.md (rules + rationale). One commit.
